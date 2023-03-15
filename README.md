@@ -1,5 +1,3 @@
-<div align="center">    
-
 ## DeepPCC: Learned Lossy Point Cloud Compression
 ### Code will be available soon
 
