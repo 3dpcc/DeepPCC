@@ -18,12 +18,14 @@ We propose the DeepPCC, an end-to-end learning-based approach for the lossy comp
 #### Dependencies
 *Coming soon*
 
- ```
 #### Training
-*Coming soon*
 
-#### Inference / Visualization
-*Coming soon*
+*Coming Soon*
 
-#### Citation   
- ```
+#### Results
+
+*Coming Soon*
+
+#### Citation
+
+*Coming Soon*
