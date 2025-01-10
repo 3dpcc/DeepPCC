@@ -76,7 +76,7 @@ The results of the paper are located in `./results`.
 
 ## Pretrained Model
 
-The DeepPCAC pretrained models are uploaded on below.
+The DeepPCAC pretrained models are uploaded on BaiduNetDisk.
 
 Website: https://pan.baidu.com/s/1OeYMMSmuBNvbbp5Q36msVA 
 
