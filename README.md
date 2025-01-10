@@ -10,7 +10,7 @@
 
 ### Examples
 
-![Examples](images\visual_front.png)
+![Diagram](images/visual_front.png)
 
 ### Method
 
