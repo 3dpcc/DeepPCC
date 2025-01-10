@@ -38,13 +38,15 @@
 
 ### DeepPCGC
 
-```python
+```shell
+cd DeepPCGC
 python test.py --filedir='TEST/8iVFB' --outdir='output/test' --resultdir='results/test' --hyper (optional --pct_pos for test R01)
 ```
 
 ### DeepPCAC
 
-```python
+```shell
+cd DeepPCAC
 python test_losslessG_lossyA.py --input_rootdir='TEST/8iVFB' (optional --quick for quick test not encoding & decoding)
 ```
 
@@ -54,13 +56,15 @@ Joint DeepPCGC & DeepPCAC
 
 Need test DeepPCGC first,
 
-```python
+```shell
+cd DeepPCGC
 python test.py --filedir='TEST/8iVFB' --outdir='output/test' --resultdir='results/test' --hyper (optional --pct_pos for test R01)
 ```
 
 then,
 
-```python
+```shell
+cd DeepPCAC
 python test_lossyG_lossyA.py --input_rootdir='TEST/8iVFB' --lossyGeo_rootdir='output/test' (optional --quick for quick test not encoding & decoding)
 ```
 
