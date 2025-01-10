@@ -1,0 +1,653 @@
+import torch
+import MinkowskiEngine as ME
+import torch.nn as nn
+import torch.nn.functional as F
+import MinkowskiEngine as ME
+import numpy as np
+
+import math
+import pytorch3d.ops
+
+class Transformer_block(torch.nn.Module):
+    def __init__(self, channels, head, k):
+        super(Transformer_block, self).__init__()
+
+        self.layer_norm_1 = nn.LayerNorm(channels)
+        self.linear = torch.nn.Linear(channels, channels)
+        self.layer_norm_2 = nn.LayerNorm(channels)
+
+        self.sa = SA_Layer(channels, head, k)
+
+    def forward(self, x, knn_feature, knn_xyz):
+        x1 = x + self.sa(x, knn_feature, knn_xyz)
+        x1_F = x1.F
+
+        x1_F = self.layer_norm_1(x1_F)
+        x1_F = x1_F + self.linear(x1_F)
+        x1_F = self.layer_norm_2(x1_F)
+
+        x1 = ME.SparseTensor(features=x1_F, coordinate_map_key=x1.coordinate_map_key,
+                             coordinate_manager=x1.coordinate_manager)
+
+        return x1
+
+
+class Point_Transformer_Last(torch.nn.Module):
+    def __init__(self, block=2, channels=128, head=1, k=16):
+        super(Point_Transformer_Last, self).__init__()
+        self.head = head
+        self.k = k
+        self.layers = torch.nn.ModuleList()
+        for i in range(block):
+            self.layers.append(Transformer_block(channels, head, k))
+
+    def forward(self, x):
+        out = x
+        x_C = out.C.unsqueeze(0).float()
+        dist, idx, _ = pytorch3d.ops.knn_points(x_C, x_C, K=self.k)
+        knn_xyz =  pytorch3d.ops.knn_gather(x_C[:,:,1:], idx)
+        center_xyz = x_C[:, :, 1:].unsqueeze(2)
+
+        knn_xyz_norm = knn_xyz - center_xyz
+        knn_xyz_norm = knn_xyz_norm.squeeze(0)
+        knn_xyz_norm = knn_xyz_norm / knn_xyz_norm.max()
+
+        for transformer in self.layers:
+            out_F = out.F.unsqueeze(0).float()
+            knn_feature = pytorch3d.ops.knn_gather(out_F[:,:,:], idx).squeeze(0)
+            out = transformer(x, knn_feature, knn_xyz_norm)
+
+        return out
+
+
+class SA_Layer(nn.Module):
+    def __init__(self, channels, head=1, k=16):
+        super(SA_Layer, self).__init__()
+        self.channels = channels
+        self.q_conv = torch.nn.Linear(channels, channels)
+        self.k_conv = torch.nn.Linear(channels + 3, channels)
+        self.v_conv = torch.nn.Linear(channels + 3, channels)
+        self.d = math.sqrt(channels)
+        self.head = head
+        self.k = k
+
+    def forward(self, x, knn_feature, knn_xyz):
+        x_q = x.F
+
+        new_knn_feature = torch.cat((knn_feature, knn_xyz), dim=2)
+
+        Q = self.q_conv(x_q).view(-1, self.head, self.channels // self.head)
+        K = self.k_conv(new_knn_feature).view(-1, self.head, self.k, self.channels // self.head)
+        attention_map = torch.einsum('nhd,nhkd->nhk', Q, K)
+        attention_map = F.softmax(attention_map / self.d, dim=-1)
+        print(attention_map)
+
+        V = self.v_conv(new_knn_feature).view(-1, self.head, self.k, self.channels // self.head)
+        attention_feature = torch.einsum('nhk,nhkd->nhd', attention_map, V)
+        attention_feature = attention_feature.view(-1, self.channels)
+
+        new_x = ME.SparseTensor(features=attention_feature, coordinate_map_key=x.coordinate_map_key,
+                                coordinate_manager=x.coordinate_manager)
+
+        return new_x
+
+
+class ResNet(torch.nn.Module):
+    def __init__(self, channels):
+        super().__init__()
+        self.conv0 = ME.MinkowskiConvolution(
+            in_channels=channels,
+            out_channels=channels,
+            kernel_size=3,
+            stride=1,
+            bias=True,
+            dimension=3)
+        self.conv1 = ME.MinkowskiConvolution(
+            in_channels=channels,
+            out_channels=channels,
+            kernel_size=3,
+            stride=1,
+            bias=True,
+            dimension=3)
+        self.relu = ME.MinkowskiReLU(inplace=True)
+
+    def forward(self, x):
+        out = self.relu(self.conv0(x))
+        out = self.conv1(out)
+        out += x
+
+        return out
+
+def make_layer(block, block_layers, channels):
+    layers = []
+    for i in range(block_layers):
+        layers.append(block(channels=channels))
+
+    return torch.nn.Sequential(*layers)
+
+class InceptionResNet(torch.nn.Module):
+    def __init__(self, channels):
+        super().__init__()
+        self.conv0_0 = ME.MinkowskiConvolution(
+            in_channels=channels,
+            out_channels=channels // 4,
+            kernel_size=1,
+            stride=1,
+            bias=True,
+            dimension=3)
+        self.conv0_1 = ME.MinkowskiConvolution(
+            in_channels=channels // 4,
+            out_channels=channels // 4,
+            kernel_size=3,
+            stride=1,
+            bias=True,
+            dimension=3)
+        self.conv0_2 = ME.MinkowskiConvolution(
+            in_channels=channels // 4,
+            out_channels=channels // 2,
+            kernel_size=1,
+            stride=1,
+            bias=True,
+            dimension=3)
+        self.conv1_0 = ME.MinkowskiConvolution(
+            in_channels=channels,
+            out_channels=channels // 4,
+            kernel_size=3,
+            stride=1,
+            bias=True,
+            dimension=3)
+        self.conv1_1 = ME.MinkowskiConvolution(
+            in_channels=channels // 4,
+            out_channels=channels // 2,
+            kernel_size=3,
+            stride=1,
+            bias=True,
+            dimension=3)
+        self.relu = ME.MinkowskiReLU(inplace=True)
+
+    def forward(self, x):
+        out = self.relu(self.conv0_0(x))
+        out0 = self.relu(self.conv0_2(self.relu(self.conv0_1(out))))
+        out1 = self.relu(self.conv1_1(self.relu(self.conv1_0(x))))
+        out = ME.cat(out0, out1)
+        return out + x
+
+#####################################################################
+class Enhancer(torch.nn.Module):
+    def __init__(self, channels=32):
+        super().__init__()
+        self.conv0 = ME.MinkowskiConvolution(
+            in_channels=channels,
+            out_channels=64,
+            kernel_size=3,
+            stride=1,
+            bias=True,
+            dimension=3)
+        # self.block0 = make_layer(block=ResNet, block_layers=3, channels=32)
+        self.res0 = InceptionResNet(channels=64)
+        # self.knn0 = Point_Transformer_Last(block=4, channels=64, head=1, k=16)
+
+        self.conv1 = ME.MinkowskiConvolution(
+            in_channels=64,
+            out_channels=128,
+            kernel_size=3,
+            stride=1,
+            bias=True,
+            dimension=3)
+        # self.block1 = make_layer(block=ResNet, block_layers=3, channels=64)
+        self.res1 = InceptionResNet(channels=128)
+        # self.knn1 = Point_Transformer_Last(channels=128, head=1, k=16)
+
+        self.conv2 = ME.MinkowskiConvolution(
+            in_channels=128,
+            out_channels=128,
+            kernel_size=3,
+            stride=1,
+            bias=True,
+            dimension=3)
+        # self.block2 = make_layer(block=ResNet, block_layers=3, channels=64)
+        self.res2 = InceptionResNet(channels=128)
+        # self.knn2 = Point_Transformer_Last(channels=128, head=1, k=16)
+
+        self.conv3 = ME.MinkowskiConvolution(
+            in_channels=128,
+            out_channels=64,
+            kernel_size=3,
+            stride=1,
+            bias=True,
+            dimension=3
+        )
+        # self.block3 = make_layer(block=ResNet, block_layers=3, channels=32)
+        self.res3 = InceptionResNet(channels=64)
+        # self.knn3 = Point_Transformer_Last(channels=128, head=1, k=16)
+
+        self.conv_out0 = ME.MinkowskiConvolution(
+            in_channels=64,
+            out_channels=64,
+            kernel_size=3,
+            stride=1,
+            bias=True,
+            dimension=3)
+
+        self.conv_out1 = ME.MinkowskiConvolution(
+            in_channels=channels,
+            out_channels=64,
+            kernel_size=3,
+            stride=1,
+            bias=True,
+            dimension=3)
+
+        self.relu = ME.MinkowskiReLU(inplace=True)
+
+    def forward(self, x):
+        out = self.res0(self.relu(self.conv0(x)))
+        # out = self.knn0(out)
+
+        out = self.res1(self.relu(self.conv1(out)))
+        # out = self.knn1(out)
+
+        out = self.res2(self.relu(self.conv2(out)))
+        # out = self.knn2(out)
+
+        out = self.res3(self.relu(self.conv3(out)))
+
+        # out = self.res4(self.relu(self.conv4(out)))
+
+        out = self.conv_out0(out)
+        out = out + self.conv_out1(x)
+
+        return out
+
+class Global_Enhancer(torch.nn.Module):
+    def __init__(self, channels=64):
+        super().__init__()
+        self.conv0 = ME.MinkowskiConvolution(
+            in_channels=channels,
+            out_channels=64,
+            kernel_size=3,
+            stride=1,
+            bias=True,
+            dimension=3)
+        # self.block0 = make_layer(block=ResNet, block_layers=3, channels=32)
+        self.res0 = InceptionResNet(channels=64)
+        # self.knn0 = Point_Transformer_Last(block=4, channels=64, head=1, k=16)
+
+        self.conv1 = ME.MinkowskiConvolution(
+            in_channels=64,
+            out_channels=64,
+            kernel_size=3,
+            stride=1,
+            bias=True,
+            dimension=3)
+        # self.block1 = make_layer(block=ResNet, block_layers=3, channels=64)
+        self.res1 = InceptionResNet(channels=64)
+        # self.knn1 = Point_Transformer_Last(channels=128, head=1, k=16)
+
+        self.conv2 = ME.MinkowskiConvolution(
+            in_channels=64,
+            out_channels=64,
+            kernel_size=3,
+            stride=1,
+            bias=True,
+            dimension=3)
+        # self.block2 = make_layer(block=ResNet, block_layers=3, channels=64)
+        self.res2 = InceptionResNet(channels=64)
+        # self.knn2 = Point_Transformer_Last(channels=128, head=1, k=16)
+
+        self.conv_out1 = ME.MinkowskiConvolution(
+            in_channels=channels,
+            out_channels=64,
+            kernel_size=3,
+            stride=1,
+            bias=True,
+            dimension=3)
+
+        self.relu = ME.MinkowskiReLU(inplace=True)
+
+    def forward(self, x):
+        out = self.res0(self.relu(self.conv0(x)))
+        # out = self.knn0(out)
+
+        out = self.res1(self.relu(self.conv1(out)))
+        # out = self.knn1(out)
+
+        out = self.res2(self.relu(self.conv2(out)))
+        # out = self.knn2(out)
+
+        out = out + self.conv_out1(x)
+
+        return out
+
+class Local_enhancer(torch.nn.Module):
+    def __init__(self, channels=32):
+        super().__init__()
+        #down sample 3 times
+        self.conv0 = ME.MinkowskiConvolution(
+            in_channels=channels,
+            out_channels=64,
+            kernel_size=3,
+            stride=1,
+            bias=True,
+            dimension=3)
+        self.down0 = ME.MinkowskiConvolution(
+            in_channels=64,
+            out_channels=64,
+            kernel_size=3,
+            stride=2,
+            bias=True,
+            dimension=3)
+        # self.block0 = make_layer(block=ResNet, block_layers=3, channels=32)
+        self.res0 = InceptionResNet(channels=64)
+        # self.knn0 = Point_Transformer_Last(block=4, channels=64, head=1, k=16)
+
+        self.conv1 = ME.MinkowskiConvolution(
+            in_channels=64,
+            out_channels=64,
+            kernel_size=3,
+            stride=1,
+            bias=True,
+            dimension=3)
+        self.down1 = ME.MinkowskiConvolution(
+            in_channels=64,
+            out_channels=64,
+            kernel_size=3,
+            stride=2,
+            bias=True,
+            dimension=3)
+        # self.block1 = make_layer(block=ResNet, block_layers=3, channels=64)
+        self.res1 = InceptionResNet(channels=64)
+        # self.knn1 = Point_Transformer_Last(channels=128, head=1, k=16)
+
+        self.conv2 = ME.MinkowskiConvolution(
+            in_channels=64,
+            out_channels=64,
+            kernel_size=3,
+            stride=1,
+            bias=True,
+            dimension=3)
+        self.down2 = ME.MinkowskiConvolution(
+            in_channels=64,
+            out_channels=64,
+            kernel_size=3,
+            stride=2,
+            bias=True,
+            dimension=3)
+        # self.block2 = make_layer(block=ResNet, block_layers=3, channels=64)
+        self.res2 = InceptionResNet(channels=64)
+        # self.knn2 = Point_Transformer_Last(channels=128, head=1, k=16)
+
+        self.conv_mid = ME.MinkowskiConvolution(
+            in_channels=64,
+            out_channels=64,
+            kernel_size=3,
+            stride=1,
+            bias=True,
+            dimension=3)
+
+        self.up2 = ME.MinkowskiConvolutionTranspose(
+            in_channels=64,
+            out_channels=64,
+            kernel_size=3,
+            stride=2,
+            bias=True,
+            dimension=3)
+        self.up_conv2 = ME.MinkowskiConvolution(
+            in_channels=64,
+            out_channels=64,
+            kernel_size=3,
+            stride=1,
+            bias=True,
+            dimension=3)
+        # self.block0 = make_layer(block=ResNet, block_layers=3, channels=32)
+        self.up_res2 = InceptionResNet(channels=64)
+        # self.knn0 = Point_Transformer_Last(block=4, channels=64, head=1, k=16)
+
+        self.up1 = ME.MinkowskiConvolutionTranspose(
+            in_channels=64,
+            out_channels=32,
+            kernel_size=3,
+            stride=2,
+            bias=True,
+            dimension=3)
+        self.up_conv1 = ME.MinkowskiConvolution(
+            in_channels=32,
+            out_channels=32,
+            kernel_size=3,
+            stride=1,
+            bias=True,
+            dimension=3)
+        # self.block1 = make_layer(block=ResNet, block_layers=3, channels=64)
+        self.up_res1 = InceptionResNet(channels=32)
+        # self.knn1 = Point_Transformer_Last(channels=128, head=1, k=16)
+
+        self.up0 = ME.MinkowskiConvolutionTranspose(
+            in_channels=32,
+            out_channels=32,
+            kernel_size=3,
+            stride=2,
+            bias=True,
+            dimension=3)
+        self.up_conv0 = ME.MinkowskiConvolution(
+            in_channels=32,
+            out_channels=32,
+            kernel_size=3,
+            stride=1,
+            bias=True,
+            dimension=3)
+        # self.block2 = make_layer(block=ResNet, block_layers=3, channels=64)
+        # self.up_res1 = InceptionResNet(channels=32)
+        # self.knn2 = Point_Transformer_Last(channels=128, head=1, k=16)
+
+        self.relu = ME.MinkowskiReLU(inplace=True)
+
+    def forward(self, x):
+        out = self.res0(self.relu(self.down0(self.conv0(x))))
+
+        out = self.res1(self.relu(self.down1(self.conv1(out))))
+
+        out = self.res2(self.relu(self.down2(self.conv2(out))))
+
+        out = self.conv_mid(out)
+
+        out = self.up_res2(self.relu(self.up_conv2(self.up2(out))))
+
+        out = self.up_res1(self.relu(self.up_conv1(self.up1(out))))
+
+        out = self.up_conv0(self.up0(out))
+
+        return out
+
+class High_enhancer(torch.nn.Module):
+    def __init__(self, k = 3, channels=32):
+        super().__init__()
+        # self.res = InceptionResNet(channels=channels)
+        self.avg = ME.MinkowskiAvgPooling(kernel_size=k, stride=2, dimension=3)
+
+        self.upsample = ME.MinkowskiConvolutionTranspose(
+            in_channels=channels,
+            out_channels=channels,
+            kernel_size=3,
+            stride=2,
+            bias=True,
+            dimension=3)
+
+    def forward(self, x):
+        # out = self.res(x)
+        out = self.avg(x)
+        out = self.upsample(out)
+
+        out = x - out
+        return out
+
+class conv_module(torch.nn.Module):
+    def __init__(self, channels=64):
+        super().__init__()
+        self.conv = ME.MinkowskiConvolution(
+            in_channels=channels,
+            out_channels=channels,
+            kernel_size=3,
+            stride=1,
+            bias=True,
+            dimension=3
+        )
+        self.res = InceptionResNet(channels=channels)
+
+        self.relu = ME.MinkowskiReLU(inplace=True)
+    def forward(self,x):
+        return x + self.res(self.relu(self.conv(x)))
+
+class conv_out(torch.nn.Module):
+    def __init__(self, channels=128):
+        super().__init__()
+        self.conv = ME.MinkowskiConvolution(
+            in_channels=channels,
+            out_channels=channels,
+            kernel_size=3,
+            stride=1,
+            bias=True,
+            dimension=3
+        )
+        self.res = InceptionResNet(channels=channels)
+
+        self.relu = ME.MinkowskiReLU(inplace=True)
+
+        self.conv_out = ME.MinkowskiConvolution(
+            in_channels=channels,
+            out_channels=3,
+            kernel_size=3,
+            stride=1,
+            bias=True,
+            dimension=3
+        )
+    def forward(self,x):
+        out = x + self.res(self.relu(self.conv(x)))
+        return self.conv_out(out)
+
+class Mutiscale_enhancer(torch.nn.Module):
+    def __init__(self, channels = 128):
+        super().__init__()
+        #pre processing
+        self.conv_in =  ME.MinkowskiConvolution(
+            in_channels=1,
+            out_channels=32,
+            kernel_size=3,
+            stride=1,
+            bias=True,
+            dimension=3)
+
+        #global feature extract
+        self.glb_enhancer = Global_Enhancer(channels=32)
+
+        #local feature extract
+        self.loc_enhancer = Local_enhancer(channels=32)
+
+        self.high_enhancer = High_enhancer()
+
+        self.conv_model = conv_module(channels=64)
+
+        self.conv_out = conv_out(channels=128)
+
+        self.conv_outx = ME.MinkowskiConvolution(
+            in_channels=1,
+            out_channels=3,
+            kernel_size=3,
+            stride=1,
+            bias=True,
+            dimension=3)
+        self.relu = ME.MinkowskiReLU(inplace=True)
+    def forward(self, x):
+        input = self.conv_in(x)
+
+        out_global = self.glb_enhancer(input)
+
+        out_local = self.loc_enhancer(input)
+
+        out_high = self.high_enhancer(input)
+
+        out_LCH = ME.cat(out_local, out_high)
+
+        out_LCH = self.conv_model(out_LCH)
+
+        out = ME.cat(out_global, out_LCH)
+
+        out = self.conv_out(out)
+
+        return out + self.conv_outx(x)
+
+class Enhancer(torch.nn.Module):
+    def __init__(self, channels=128, A=3):
+        super(Enhancer, self).__init__()
+        self.conv_in = ME.MinkowskiConvolution(in_channels=1,
+            out_channels=32,
+            kernel_size=3,
+            stride=1,
+            bias=True,
+            dimension=3)
+        self.conv0 = ME.MinkowskiConvolution(in_channels=32,
+            out_channels=64,
+            kernel_size=3,
+            stride=1,
+            bias=True,
+            dimension=3)
+        self.IRN0 = InceptionResNet(channels=64)
+        self.conv1 = ME.MinkowskiConvolution(in_channels=64,
+            out_channels=channels,
+            kernel_size=3,
+            stride=1,
+            bias=True,
+            dimension=3)
+        self.IRN1 = InceptionResNet(channels=channels)
+        self.conv2 = ME.MinkowskiConvolution(in_channels=channels,
+            out_channels=channels,
+            kernel_size=3,
+            stride=1,
+            bias=True,
+            dimension=3)
+        self.IRN2 = InceptionResNet(channels=channels)
+        self.conv3 = ME.MinkowskiConvolution(in_channels=channels,
+            out_channels=64,
+            kernel_size=3,
+            stride=1,
+            bias=True,
+            dimension=3)
+        self.IRN3 = InceptionResNet(channels=64)
+        self.conv4 = ME.MinkowskiConvolution(in_channels=64,
+            out_channels=32,
+            kernel_size=3,
+            stride=1,
+            bias=True,
+            dimension=3)
+        self.conv_out = ME.MinkowskiConvolution(in_channels=32,
+            out_channels=A,
+            kernel_size=3,
+            stride=1,
+            bias=True,
+            dimension=3)
+        self.relu = ME.MinkowskiReLU(inplace=True)
+    def forward(self, x):
+        out = self.relu(self.conv_in(x))
+        out = self.relu(self.IRN0(self.conv0(out)))
+        out = self.relu(self.IRN1(self.conv1(out)))
+        out = self.relu(self.IRN2(self.conv2(out)))
+        out = self.relu(self.IRN3(self.conv3(out)))
+        out = self.conv_out(self.relu(self.conv4(out)))
+        return out
+if __name__ == '__main__':
+    # encoder = Encoder(128, 3)
+    # print(encoder)
+    # decoder = Decoder(128, 3)
+    # print(decoder)
+    #
+    # hyperEncoder = HyperEncoder(128)
+    # print(hyperEncoder)
+    # hyperDecoder = HyperDecoder(128)
+    # print(hyperDecoder)
+    #
+    # contextModelBase = ContextModelBase(128)
+    # print(contextModelBase)
+    #
+    # contextModelHyper = ContextModelHyper(128)
+    # print(contextModelHyper)
+    enhance = Mutiscale_enhancer()
+    print(enhance)
+    print('params:', sum(param.numel() for param in enhance.parameters()))
