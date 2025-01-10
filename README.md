@@ -70,6 +70,14 @@ Adjust the paths of different pre-trained models to test various compression rat
 
 The results of the paper are located in `./results`.
 
+## Pretrained Model
+
+The DeepPCAC pretrained models are uploaded on below.
+
+Website: https://pan.baidu.com/s/1OeYMMSmuBNvbbp5Q36msVA 
+
+Password: mtq8
+
 ## Authors
 
 These files are provided by Hangzhou Normal University [IVC Lab](https://github.com/3dpcc/3DPCC) and Nanjing University [Vision Lab](https://vision.nju.edu.cn/).  Please contact us (zhangjunzhe@stu.hznu.edu.cn, DandanDing@hznu.edu.cn and mazhan@nju.edu.cn) if you have any questions.
