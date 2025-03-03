@@ -41,7 +41,7 @@ def knn_interpolation(x, new_coords, k):
     interpolation_attribute = d_i * torch.sum(knn_attribute_weight, dim=1)
     return interpolation_attribute
 
-def test_compression(model_list, input_rootdir, output_rootdir, input_format, quick, partition, num_points, lossyGeo_rootdir):
+def test_compression(model_list, input_rootdir, output_rootdir, input_format, quick, lossyGeo_rootdir):
     input_filedirs = sorted(glob.glob(os.path.join(input_rootdir, '**', f'*' + input_format), recursive=True))
     lossyGeo_filedirs = sorted(glob.glob(os.path.join(lossyGeo_rootdir, '**', f'*' + input_format), recursive=True))
     input_filedirs = input_filedirs[: args.frame]
@@ -166,6 +166,6 @@ if __name__ == '__main__':
         ckpt = torch.load(ckptsdir, map_location='cuda:0')
         model.load_state_dict(ckpt['model'])
         model_list.append(model)
-    results = test_compression(model_list, args.input_rootdir, args.output_rootdir, args.input_format, args.quick, args.partition, args.num_points, args.lossyGeo_rootdir)
+    results = test_compression(model_list, args.input_rootdir, args.output_rootdir, args.input_format, args.quick, args.num_points, args.lossyGeo_rootdir)
     print(results)
 
