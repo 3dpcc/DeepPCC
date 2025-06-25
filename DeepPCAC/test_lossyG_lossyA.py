@@ -166,6 +166,6 @@ if __name__ == '__main__':
         ckpt = torch.load(ckptsdir, map_location='cuda:0')
         model.load_state_dict(ckpt['model'])
         model_list.append(model)
-    results = test_compression(model_list, args.input_rootdir, args.output_rootdir, args.input_format, args.quick, args.num_points, args.lossyGeo_rootdir)
+    results = test_compression(model_list, args.input_rootdir, args.output_rootdir, args.input_format, args.quick, args.lossyGeo_rootdir)
     print(results)
 
